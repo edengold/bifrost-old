@@ -81,6 +81,11 @@ type RoutingPlugin struct {
 	turnTierStore      *complexityTurnTierStore
 	sessionEnabled     atomic.Bool
 
+	// healthTracker remembers how the most recent attempts against each provider
+	// key ended, across requests. Rules read it through the *_health CEL
+	// variables; the tracker itself has no routing behavior.
+	healthTracker *healthTracker
+
 	// governance supplies the virtual key, its live budget/rate-limit usage, and the provider
 	// materialization that runs once rules have decided. Required: rules address budgets and
 	// rate limits, and the scope chain is built from the virtual key hierarchy.
@@ -174,6 +179,7 @@ func InitFromStore(
 		governance:         governancePlugin,
 		configStore:        configStore,
 		logger:             logger,
+		healthTracker:      newHealthTracker(),
 		semanticClassifier: complexity.NewSemanticClassifier(ctx, logger),
 		llmClassifier:      complexity.NewLLMClassifier(logger),
 	}
@@ -514,6 +520,7 @@ func (p *RoutingPlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *sche
 		QueryParams:              queryParams,
 		BudgetAndRateLimitStatus: p.governance.GetBudgetAndRateLimitStatus(ctx, provider, model, nil, nil, nil),
 		ComputeComplexity:        computeComplexity,
+		ProviderHealth:           p.healthTracker.snapshotForProvider(string(provider)),
 	}
 
 	p.logger.Debug("[Routing] Built routing context: provider=%s, model=%s, requestType=%s, vk=%s",
@@ -590,6 +597,11 @@ func (p *RoutingPlugin) PreLLMHook(_ *schemas.BifrostContext, req *schemas.Bifro
 // pre-hook order), so the stamp is visible to governance cost calculation and
 // every later post-hook consumer.
 func (p *RoutingPlugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	// Feed the health tracker before the telemetry stamp: both only matter for a
+	// finished request, and the tracker is the cheaper of the two jobs. A failure
+	// classifies through core's own ClassifyFailure, so rules see the same class
+	// the retry loop acted on.
+	p.observeAttempt(ctx, resp, bifrostErr)
 	if ctx != nil && resp != nil {
 		final := false
 		if extraFields := resp.GetExtraFields(); extraFields != nil {

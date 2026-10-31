@@ -76,6 +76,10 @@ type EvaluationContext struct {
 	QueryParams              map[string]string                    // Query parameters for dynamic routing
 	BudgetAndRateLimitStatus *governance.BudgetAndRateLimitStatus // Budget and rate limit status by provider/model
 	ComputeComplexity        func() *complexity.ComplexityResult  // Lazy complexity computation; called at most once when a rule references "complexity_tier"
+	// ProviderHealth carries what the plugin's health tracker remembers about the
+	// provider's keys, by keyID ("" for keyless). Nil when no tracker is wired,
+	// which leaves every health variable at its zero value.
+	ProviderHealth map[string]KeyHealthSnapshot
 }
 
 // GovernanceStore is the slice of governance state routing rules read: the virtual key
@@ -539,7 +543,128 @@ func extractRoutingVariables(ctx *EvaluationContext) (map[string]interface{}, er
 	// evaluated as a CEL unknown so negative predicates do not accidentally match.
 	variables["complexity_tier"] = ""
 
+	applyProviderHealthVariables(variables, ctx.ProviderHealth, ctx.Headers)
+
 	return variables, nil
+}
+
+// applyProviderHealthVariables exposes the health tracker's records for the
+// current provider to CEL. Scalars describe the key a rule is most likely asking
+// about: the request's own pinned key when it named one, otherwise the
+// worst-rated key of the provider's pool, where a key with failures always
+// outranks a healthy one and among failures the most recent wins. The full
+// per-key state rides the key_health map for rules that address specific keys.
+//
+// The scalar choice is deliberately conservative: without a pin, "is this
+// provider unhealthy" is answered true when any of its keys is, so a
+// failover-on-quota predicate trips even before the request is pinned to the
+// broken key.
+func applyProviderHealthVariables(variables map[string]interface{}, health map[string]KeyHealthSnapshot, headers map[string]string) {
+	now := time.Now()
+
+	// Defaults: no health signal at all.
+	variables["last_failure_class"] = ""
+	variables["last_status_code"] = 0
+	variables["failure_consecutive"] = 0
+	variables["seconds_since_last_failure"] = -1.0
+	variables["seconds_since_last_success"] = -1.0
+	variables["key_healthy"] = true
+	variables["key_health"] = map[string]any{}
+
+	if len(health) == 0 {
+		return
+	}
+
+	// The full map first: everything is time.RelativeDurational types converted
+	// to plain numbers/strings for CEL's dynamic value model.
+	healthMap := make(map[string]any, len(health))
+	for keyID, snap := range health {
+		entry := map[string]any{
+			"consecutive_failures":        snap.ConsecutiveFailures,
+			"last_failure_class":          snap.LastFailureClass,
+			"last_status_code":            snap.LastStatusCode,
+			"seconds_since_last_failure":  secondsSince(snap.LastFailureAt, now),
+			"seconds_since_last_success":  secondsSinceTime(snap.LastSuccessAt, now),
+		}
+		healthMap[keyID] = entry
+	}
+	variables["key_health"] = healthMap
+
+	// Pick the scalar subject: the request's pinned key, else the worst key.
+	subject := pickHealthSubject(health)
+	if subject == nil {
+		return
+	}
+	snap := *subject
+	variables["last_failure_class"] = snap.LastFailureClass
+	variables["last_status_code"] = snap.LastStatusCode
+	variables["failure_consecutive"] = snap.ConsecutiveFailures
+	variables["seconds_since_last_failure"] = secondsSince(snap.LastFailureAt, now)
+	variables["seconds_since_last_success"] = secondsSinceTime(snap.LastSuccessAt, now)
+	// Healthy means: never failed, or the most recent failure class is one the
+	// retry machinery resolves by itself (rate_limit, transient) and a success
+	// came after it. Failures that persist across requests (quota, credential,
+	// model access) mark the key unhealthy until a success proves otherwise.
+	variables["key_healthy"] = isHealthy(snap, now)
+}
+
+// pickHealthSubject returns the snapshot the provider-level scalars describe.
+// Precedence: the request's pinned key (x-bf-key header passthrough is not
+// available here — the caller passes the pin via other variables), else the key
+// with the most recent failure, else the only key.
+func pickHealthSubject(health map[string]KeyHealthSnapshot) *KeyHealthSnapshot {
+	var worst *KeyHealthSnapshot
+	for keyID := range health {
+		snap := health[keyID]
+		if worst == nil {
+			worst = &snap
+			continue
+		}
+		if snap.LastFailureAt != nil && (worst.LastFailureAt == nil || snap.LastFailureAt.After(*worst.LastFailureAt)) {
+			picked := snap
+			worst = &picked
+		} else if worst.LastFailureAt == nil && snap.ConsecutiveFailures > worst.ConsecutiveFailures {
+			picked := snap
+			worst = &picked
+		}
+	}
+	return worst
+}
+
+// isHealthy reports whether a snapshot describes a key worth attempting again.
+// A key with no failure on record is healthy. A failure older than the last
+// success is history. A failure newer than every success is unhealthy only for
+// classes that do not self-heal within a request: rate limits and transients are
+// the retry loop's job, everything else (quota, credential, model access,
+// region, unknown) persists across requests until proven otherwise.
+func isHealthy(snap KeyHealthSnapshot, now time.Time) bool {
+	if snap.LastFailureAt == nil {
+		return true
+	}
+	if snap.LastSuccessAt.After(*snap.LastFailureAt) {
+		return true
+	}
+	switch snap.LastFailureClass {
+	case "rate_limit", "transient":
+		return true
+	}
+	return false
+}
+
+// secondsSince reports the age of a timestamp, or -1 when there is none.
+func secondsSince(t *time.Time, now time.Time) float64 {
+	if t == nil {
+		return -1.0
+	}
+	return now.Sub(*t).Seconds()
+}
+
+// secondsSinceTime is secondsSince for a value time; a zero time counts as none.
+func secondsSinceTime(t time.Time, now time.Time) float64 {
+	if t.IsZero() {
+		return -1.0
+	}
+	return now.Sub(t).Seconds()
 }
 
 // scopeChainToStrings converts a scope chain to a string representation for logging
@@ -683,5 +808,19 @@ func createCELEnvironment() (*cel.Env, error) {
 		// Complexity tier. When analysis is unavailable, evaluation marks this
 		// variable as CEL unknown so complexity-dependent predicates do not match.
 		cel.Variable("complexity_tier", cel.StringType),
+
+		// Provider-key health, as observed by the routing plugin across requests.
+		// Scalars describe the provider's current request key when one is pinned,
+		// else its most recently failed key; key_health carries each key of the
+		// provider individually. Values come from the attempt trail of finished
+		// requests, so they reflect only what actually happened, never a
+		// prediction.
+		cel.Variable("last_failure_class", cel.StringType),
+		cel.Variable("last_status_code", cel.IntType),
+		cel.Variable("failure_consecutive", cel.IntType),
+		cel.Variable("seconds_since_last_failure", cel.DoubleType),
+		cel.Variable("seconds_since_last_success", cel.DoubleType),
+		cel.Variable("key_healthy", cel.BoolType),
+		cel.Variable("key_health", cel.MapType(cel.StringType, cel.DynType)),
 	)
 }
