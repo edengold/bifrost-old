@@ -18,7 +18,7 @@ func TestHealthTrackerRecordAndRecover(t *testing.T) {
 		tracker := newHealthTracker()
 		at := time.Now()
 
-		tracker.recordFailure("LLM Gateway (DevPass)", "key-a", "quota", 429, at)
+		tracker.recordFailure("LLM Gateway (DevPass)", "key-a", "quota", 429, at, "daily pacing allowance exceeded")
 		snaps := tracker.snapshotForProvider("LLM Gateway (DevPass)")
 		if got := len(snaps); got != 1 {
 			t.Fatalf("snapshots = %d entries, want 1", got)
@@ -29,7 +29,7 @@ func TestHealthTrackerRecordAndRecover(t *testing.T) {
 		}
 
 		// A second failure accumulates and replaces the class.
-		tracker.recordFailure("LLM Gateway (DevPass)", "key-a", "credential", 401, at.Add(5*time.Second))
+		tracker.recordFailure("LLM Gateway (DevPass)", "key-a", "credential", 401, at.Add(5*time.Second), "invalid api key")
 		state = tracker.snapshotForProvider("LLM Gateway (DevPass)")["key-a"]
 		if state.ConsecutiveFailures != 2 || state.LastFailureClass != "credential" || state.LastStatusCode != 401 {
 			t.Errorf("after second failure: %+v", state)

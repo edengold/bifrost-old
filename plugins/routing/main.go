@@ -521,6 +521,7 @@ func (p *RoutingPlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *sche
 		BudgetAndRateLimitStatus: p.governance.GetBudgetAndRateLimitStatus(ctx, provider, model, nil, nil, nil),
 		ComputeComplexity:        computeComplexity,
 		ProviderHealth:           p.healthTracker.snapshotForProvider(string(provider)),
+		ProviderHealthTable:      p.healthTracker.snapshotAll(),
 	}
 
 	p.logger.Debug("[Routing] Built routing context: provider=%s, model=%s, requestType=%s, vk=%s",

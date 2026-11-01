@@ -80,6 +80,11 @@ type EvaluationContext struct {
 	// provider's keys, by keyID ("" for keyless). Nil when no tracker is wired,
 	// which leaves every health variable at its zero value.
 	ProviderHealth map[string]KeyHealthSnapshot
+	// ProviderHealthTable carries the same snapshots for EVERY provider seen by
+	// this process, keyed by provider name. Rules run before provider selection,
+	// so the request's own provider is often empty; a drain-primary rule must be
+	// able to ask about a fixed provider by name regardless.
+	ProviderHealthTable map[string]map[string]KeyHealthSnapshot
 }
 
 // GovernanceStore is the slice of governance state routing rules read: the virtual key
@@ -545,6 +550,12 @@ func extractRoutingVariables(ctx *EvaluationContext) (map[string]interface{}, er
 
 	applyProviderHealthVariables(variables, ctx.ProviderHealth, ctx.Headers)
 
+	// ProviderHealthTable carries the whole fleet (provider → per-key snapshots)
+	// for rules that need a provider OTHER than the one the request currently
+	// targets — the common drain-primary case, where rules run before any
+	// provider selection and ctx.Provider itself is usually empty.
+	variables["provider_health"] = providerHealthTable(ctx.ProviderHealthTable)
+
 	return variables, nil
 }
 
@@ -566,6 +577,7 @@ func applyProviderHealthVariables(variables map[string]interface{}, health map[s
 	variables["last_failure_class"] = ""
 	variables["last_status_code"] = 0
 	variables["failure_consecutive"] = 0
+	variables["last_error_message"] = ""
 	variables["seconds_since_last_failure"] = -1.0
 	variables["seconds_since_last_success"] = -1.0
 	variables["key_healthy"] = true
@@ -583,6 +595,7 @@ func applyProviderHealthVariables(variables map[string]interface{}, health map[s
 			"consecutive_failures":        snap.ConsecutiveFailures,
 			"last_failure_class":          snap.LastFailureClass,
 			"last_status_code":            snap.LastStatusCode,
+			"last_error_message":          snap.LastErrorMessage,
 			"seconds_since_last_failure":  secondsSince(snap.LastFailureAt, now),
 			"seconds_since_last_success":  secondsSinceTime(snap.LastSuccessAt, now),
 		}
@@ -599,6 +612,7 @@ func applyProviderHealthVariables(variables map[string]interface{}, health map[s
 	variables["last_failure_class"] = snap.LastFailureClass
 	variables["last_status_code"] = snap.LastStatusCode
 	variables["failure_consecutive"] = snap.ConsecutiveFailures
+	variables["last_error_message"] = snap.LastErrorMessage
 	variables["seconds_since_last_failure"] = secondsSince(snap.LastFailureAt, now)
 	variables["seconds_since_last_success"] = secondsSinceTime(snap.LastSuccessAt, now)
 	// Healthy means: never failed, or the most recent failure class is one the
@@ -665,6 +679,44 @@ func secondsSinceTime(t time.Time, now time.Time) float64 {
 		return -1.0
 	}
 	return now.Sub(t).Seconds()
+}
+
+// providerHealthTable builds the CEL `provider_health` map: provider name →
+// per-key health entries, mirroring key_health's shape one level up. Rules run
+// before provider selection, so a drain-primary rule must address the primary
+// BY NAME — the request's ctx provider is empty at evaluation time.
+func providerHealthTable(table map[string]map[string]KeyHealthSnapshot) map[string]any {
+	now := time.Now()
+	out := make(map[string]any, len(table))
+	for provider, keys := range table {
+		if len(keys) == 0 {
+			continue
+		}
+		perKey := make(map[string]any, len(keys)+1)
+		for keyID, snap := range keys {
+			perKey[keyID] = healthEntry(snap, now)
+		}
+		// "*" aggregates the provider for rules that don't address a specific
+		// key: the same worst-key pick the provider-level scalars use.
+		if worst := pickHealthSubject(keys); worst != nil {
+			perKey["*"] = healthEntry(*worst, now)
+		}
+		out[provider] = perKey
+	}
+	return out
+}
+
+// healthEntry is the per-key CEL entry shared by key_health and provider_health.
+func healthEntry(snap KeyHealthSnapshot, now time.Time) map[string]any {
+	return map[string]any{
+		"consecutive_failures":       snap.ConsecutiveFailures,
+		"last_failure_class":         snap.LastFailureClass,
+		"last_status_code":           snap.LastStatusCode,
+		"last_error_message":         snap.LastErrorMessage,
+		"healthy":                    isHealthy(snap, now),
+		"seconds_since_last_failure": secondsSince(snap.LastFailureAt, now),
+		"seconds_since_last_success": secondsSinceTime(snap.LastSuccessAt, now),
+	}
 }
 
 // scopeChainToStrings converts a scope chain to a string representation for logging
@@ -818,9 +870,11 @@ func createCELEnvironment() (*cel.Env, error) {
 		cel.Variable("last_failure_class", cel.StringType),
 		cel.Variable("last_status_code", cel.IntType),
 		cel.Variable("failure_consecutive", cel.IntType),
+		cel.Variable("last_error_message", cel.StringType),
 		cel.Variable("seconds_since_last_failure", cel.DoubleType),
 		cel.Variable("seconds_since_last_success", cel.DoubleType),
 		cel.Variable("key_healthy", cel.BoolType),
 		cel.Variable("key_health", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("provider_health", cel.MapType(cel.StringType, cel.DynType)),
 	)
 }

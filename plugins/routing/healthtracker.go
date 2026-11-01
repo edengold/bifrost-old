@@ -71,9 +71,12 @@ func (t *healthTracker) recordSuccess(provider, keyID string, at time.Time) {
 // recordFailure stamps one failed attempt. It replaces the last-failure record
 // outright: rules read the most recent failure, and a stale block that predates a
 // newer transient failure must not leak into a "quota" predicate.
-func (t *healthTracker) recordFailure(provider, keyID string, failureClass string, statusCode int, at time.Time) {
+func (t *healthTracker) recordFailure(provider, keyID string, failureClass string, statusCode int, at time.Time, errorMessage string) {
 	if provider == "" {
 		return
+	}
+	if len(errorMessage) > 512 {
+		errorMessage = errorMessage[:512]
 	}
 	key := trackerKey(provider, keyID)
 	t.mu.Lock()
@@ -83,8 +86,29 @@ func (t *healthTracker) recordFailure(provider, keyID string, failureClass strin
 	state.ConsecutiveFailures++
 	state.LastFailureClass = failureClass
 	state.LastStatusCode = statusCode
+	state.LastErrorMessage = errorMessage
 	state.LastFailureAt = &at
 	t.byKey[key] = state
+}
+
+// snapshotAll returns every provider's per-key snapshots, keyed provider →
+// keyID → snapshot. Feeds the rules package's provider_health table.
+func (t *healthTracker) snapshotAll() map[string]map[string]rules.KeyHealthSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]map[string]rules.KeyHealthSnapshot, len(t.keysOf))
+	for provider, keys := range t.keysOf {
+		perProvider := make(map[string]rules.KeyHealthSnapshot, len(keys))
+		for key := range keys {
+			keyID := ""
+			if i := strings.IndexByte(key, '|'); i >= 0 {
+				keyID = key[i+1:]
+			}
+			perProvider[keyID] = t.byKey[key]
+		}
+		out[provider] = perProvider
+	}
+	return out
 }
 
 // snapshotForProvider returns the per-key snapshots of one provider, keyed by
@@ -124,7 +148,11 @@ func (p *RoutingPlugin) observeAttempt(ctx *schemas.BifrostContext, resp *schema
 		if bifrostErr.StatusCode != nil {
 			status = *bifrostErr.StatusCode
 		}
-		p.healthTracker.recordFailure(string(provider), keyID, string(class), status, now)
+		errorMessage := ""
+		if bifrostErr.Error != nil {
+			errorMessage = bifrostErr.Error.Message
+		}
+		p.healthTracker.recordFailure(string(provider), keyID, string(class), status, now, errorMessage)
 		return
 	}
 	if resp == nil {

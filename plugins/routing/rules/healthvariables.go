@@ -17,6 +17,10 @@ type KeyHealthSnapshot struct {
 	LastFailureClass string
 	// LastStatusCode is the HTTP status of the most recent failure, 0 when none.
 	LastStatusCode int
+	// LastErrorMessage is the raw upstream error message of the most recent
+	// failure, for rules that match on text (CEL matches()). Truncated to keep
+	// tracker entries small.
+	LastErrorMessage string
 	// LastFailureAt is when the most recent failure was recorded; nil when none.
 	LastFailureAt *time.Time
 	// LastSuccessAt is when the key last served a successful attempt; zero when
