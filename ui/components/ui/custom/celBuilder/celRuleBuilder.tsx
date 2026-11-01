@@ -24,6 +24,7 @@ import { useTranslation } from "react-i18next";
 import { Field, QueryBuilder, RuleGroupType } from "react-querybuilder";
 import "react-querybuilder/dist/query-builder.css";
 import { normalizeRoutingRuleGroupQuery } from "@/lib/utils/routingRuleGroupQuery";
+import { celToRuleGroup } from "@/lib/utils/celToRuleGroup";
 import { ActionButton } from "./actionButton";
 import { CombinatorSelector } from "./combinatorSelector";
 import { FieldSelector } from "./fieldSelector";
@@ -182,9 +183,19 @@ export function CELRuleBuilder({
 	};
 
 	const requestSwitchToBuilder = () => {
-		// Switching back to the builder discards any hand-written CEL (there is no CEL→query parser),
-		// so confirm first when the text would actually be lost.
-		if (celText.trim() && celText.trim() !== convertToCELRef.current(query).trim()) {
+		// Try importing the hand-written CEL into the builder first. Only when it
+		// cannot be represented (unknown fields, mixed combinators, unsupported
+		// syntax) fall back to the discard confirmation.
+		const text = celText.trim();
+		if (text && text !== convertToCELRef.current(query).trim()) {
+			const imported = celToRuleGroup(text);
+			if (imported) {
+				setQuery(imported);
+				setMode("builder");
+				onModeChangeRef.current?.("builder");
+				// The query effect will emit the canonical CEL back through onChange.
+				return;
+			}
 			setConfirmSwitchToBuilder(true);
 			return;
 		}
