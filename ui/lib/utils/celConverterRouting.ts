@@ -224,6 +224,19 @@ function convertRuleToCEL(rule: RuleType): string {
 		}
 	}
 
+	// provider_healthy is a UI-only fiction over the provider_health map: the
+	// builder writes a readable "provider X is (not) healthy" row, and this
+	// converter emits the real guarded CEL. Health comes from the routing
+	// plugin's tracker, so it only carries data after the first attempt.
+	const isProviderHealthField = field === "provider_healthy";
+	if (isProviderHealthField && (operator === "=" || operator === "!=")) {
+		const providerName = String(value).trim();
+		if (providerName && providerName !== "__none__") {
+			const negation = operator === "!=" ? "!" : "";
+			return `${negation}("${providerName}" in provider_health && provider_health["${providerName}"]["*"].healthy)`;
+		}
+	}
+
 	// Handle other keyValue fields (headers, params) for other operators
 	if (isKeyValueField) {
 		const keyValuePair = parseKeyValue(String(value));

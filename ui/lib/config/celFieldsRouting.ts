@@ -204,6 +204,16 @@ export const baseRoutingFields: CELFieldDefinition[] = [
 		},
 		{ label: "routing.cel.fields.queryParameter", placeholder: "routing.cel.placeholders.queryParameter" },
 	),
+	field(
+		{
+			name: "provider_healthy",
+			inputType: "select",
+			valueEditorType: "select",
+			operators: ["=", "!="],
+			defaultOperator: "=",
+		},
+		{ label: "routing.cel.fields.providerHealth", placeholder: "routing.complexityUi.selectProvider", description: "routing.cel.descriptions.providerHealth" },
+	),
 ];
 
 /**
@@ -249,6 +259,17 @@ export function getRoutingFields(providers: string[] = [], models: string[] = []
 			return {
 				...field,
 				values: providerValues,
+			};
+		}
+		if (field.name === "provider_healthy") {
+			// Bare "__none__" when no providers are configured so the select still renders.
+			const healthValues = providers.length > 0
+				? providers.map((provider) => ({ name: provider, label: getProviderLabel(provider) }))
+				: [{ name: "__none__", label: tm("routing.cel.noProvidersConfigured"), disabled: true }];
+			return {
+				...field,
+				values: healthValues,
+				defaultValue: healthValues[0]?.name,
 			};
 		}
 		if (field.name === "model") {

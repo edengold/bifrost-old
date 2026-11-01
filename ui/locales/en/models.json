@@ -2083,7 +2083,8 @@
 				"request": "Request (%)",
 				"budgetUsed": "Budget Used (%)",
 				"complexityTier": "Complexity Tier",
-				"queryParameter": "Query Parameter"
+				"queryParameter": "Query Parameter",
+				"providerHealth": "Provider Health"
 			},
 			"placeholders": {
 				"model": "e.g., gpt-4, claude-3-sonnet",
@@ -2098,7 +2099,8 @@
 				"requestType": "Filter rules by the type of API request (chat, text, embeddings, images, audio, etc.). Streaming and non-streaming requests are distinct types: select both to cover all requests of a kind.",
 				"tokensUsed": "Check token usage as percentage. Checked against max of model and provider configs.",
 				"request": "Check request usage as percentage. Checked against max of model and provider configs.",
-				"budgetUsed": "Check budget usage as percentage. Checked against max of model and provider configs."
+				"budgetUsed": "Check budget usage as percentage. Checked against max of model and provider configs.",
+				"providerHealth": "Route on what the gateway observed about a provider's keys (last failure class, status, message). Only meaningful after the provider has served at least one request in this process; use \"is not\" to fail over while the provider is broken."
 			},
 			"noProvidersConfigured": "No providers configured",
 			"providerLevel": "(provider-level)",
